@@ -1,8 +1,9 @@
 /**
  * pi-next-prompt — 在 AI 本轮最终回复结束后，猜一句用户接下来可能会说的话，填进输入框。
  *
- * 三个时点各司其职：
+ * 四个时点各司其职：
  * - before_agent_start：往系统提示追加约定，让模型在最终回复末尾单独一行写出猜测
+ * - 流式期间：显示层遮挡哨兵及其后内容，避免猜测在输出过程中被看到（只影响渲染）
  * - message_end：抠出该行并把它从消息里真正删掉（state / 落盘 / UI 同时生效）
  * - agent_settled：本轮确实收尾、编辑器为空时，把暂存的猜测写进编辑器
  *
@@ -14,16 +15,19 @@ import type { ExtensionAPI, MessageEndEvent } from '@earendil-works/pi-coding-ag
 /** 事件里那条带 role 判别的 assistant 消息类型；pi 未直接导出 AssistantMessage */
 type AssistantMessage = Extract<MessageEndEvent['message'], { role: 'assistant' }>
 
-/** 猜测行的起始标记，纯 ASCII，避免模型对罕见符号的复现失真 */
+/**
+ * 猜测行的起始标记。保持纯 ASCII，确保模型复现不走样；
+ * 正文里以 N 开头的行会有瞬间误吞，靠 hideGuess 的行首锚定与「判定不符就恢复」把影响收在一帧内
+ */
 const SENTINEL = 'NEXT_PROMPT:'
 
 /** 追加到系统提示尾部的约定段 */
 const RULE = `
 
-## 下一次输入预测
-当你结束本轮、不再调用任何工具时，在回复的最后单独另起一行输出：
-${SENTINEL} <一句你猜测用户接下来会对你说的话，用用户的语言>
-该行不属于正文。仍在调用工具，或没有把握时，不要输出该行。`
+## Next input prediction
+When you finish this turn and will not call any more tools, output this as the very last line of your reply, on its own line:
+${SENTINEL} <one sentence guessing what the user will say to you next, in the user's language>
+That line is not part of the answer. If you are still calling tools, or are not confident, do not output it.`
 
 /**
  * message_end 捕获到的猜测，等 agent_settled 落地。
@@ -56,6 +60,23 @@ export function stripGuess(message: AssistantMessage): {
   return { message }
 }
 
+/**
+ * 流式期间的显示层遮挡：截掉哨兵及其后内容，让猜测在输出过程中不可见。
+ * 每次流式增量都会带着当前全文重跑，判定为「不是哨兵」时上一帧的隐藏自动消失。
+ */
+export function hideGuess(text: string): string {
+  const at = text.lastIndexOf(SENTINEL)
+  if (at !== -1) return text.slice(0, at)
+  // 哨兵只出了半截（如「NEXT」）时也一并吞掉，否则流式期间会闪现；
+  // 只认行首起始的这段，句中出现的同样前缀（如英文词尾）不动
+  const lineStart = text.lastIndexOf('\n') + 1
+  const tail = text.slice(lineStart)
+  if (tail.length > 0 && tail.length < SENTINEL.length && SENTINEL.startsWith(tail)) {
+    return text.slice(0, lineStart)
+  }
+  return text
+}
+
 export default function (pi: ExtensionAPI) {
   // 换会话时清掉上一条残留，避免跨会话误填
   pi.on('session_start', () => {
@@ -65,7 +86,14 @@ export default function (pi: ExtensionAPI) {
   // 1. 注入约定：告诉模型在最终回复末尾的哪一行写什么
   pi.on('before_agent_start', (event) => ({ systemPrompt: event.systemPrompt + RULE }))
 
-  // 2. 捕获 + 真删：改写这条消息，agent state、落盘记录、UI 都用不含哨兵行的版本
+  // 2. 显示层遮挡：只在流式期间生效。transformer 是会话级常驻，
+  // 非流式时套用会把正文里提到的哨兵永久隐藏，因此必须靠 isStreaming 收口
+  pi.registerMarkdownTransformer((markdown, context) => {
+    if (context.messageType !== 'assistant' || !context.isStreaming) return markdown
+    return hideGuess(markdown)
+  })
+
+  // 3. 捕获 + 真删：改写这条消息，agent state、落盘记录、UI 都用不含哨兵行的版本
   pi.on('message_end', (event) => {
     if (event.message.role !== 'assistant') return
     const { message, guess } = stripGuess(event.message)
@@ -73,7 +101,7 @@ export default function (pi: ExtensionAPI) {
     if (message !== event.message) return { message }
   })
 
-  // 3. 落地：只有本轮真正收尾时才写编辑器，带工具调用的中间轮不会触发
+  // 4. 落地：只有本轮真正收尾时才写编辑器，带工具调用的中间轮不会触发
   pi.on('agent_settled', (event, ctx) => {
     const guess = pendingGuess
     pendingGuess = undefined

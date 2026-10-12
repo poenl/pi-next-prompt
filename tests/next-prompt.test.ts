@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 
 import type { MessageEndEvent } from '@earendil-works/pi-coding-agent'
 
-import { stripGuess } from '../src/index'
+import { hideGuess, stripGuess } from '../src/index'
 
 type AssistantMessage = Extract<MessageEndEvent['message'], { role: 'assistant' }>
 
@@ -59,5 +59,27 @@ describe('stripGuess', () => {
     const { message, guess } = stripGuess(assistant('NEXT_PROMPT: 只有猜测'))
     expect(guess).toBe('只有猜测')
     expect(message.content).toEqual([])
+  })
+})
+
+describe('hideGuess', () => {
+  test('完整哨兵及其后的猜测一并截掉', () => {
+    expect(hideGuess('正文\nNEXT_PROMPT: 猜测内容')).toBe('正文\n')
+  })
+
+  test('哨兵只出了半截时按行首锚定吞掉，不闪现', () => {
+    expect(hideGuess('正文\nNEXT')).toBe('正文\n')
+  })
+
+  test('句中出现的同样前缀不触发，正文原样保留', () => {
+    expect(hideGuess('正文NEXT')).toBe('正文NEXT')
+  })
+
+  test('没有哨兵时原样返回', () => {
+    expect(hideGuess('只有正文')).toBe('只有正文')
+  })
+
+  test('多次出现时取最后一次', () => {
+    expect(hideGuess('NEXT_PROMPT: 假的\n正文')).toBe('')
   })
 })
