@@ -20,11 +20,9 @@ That line is stripped before it reaches agent state, disk, or the UI, so it neve
 > add a test for this
 ```
 
-If the model does not comply, the result is simply "no suggestion this turn" — no error.
-
 ## Install
 
-`package.json` already declares the `pi` manifest (`extensions: ["./src"]`), so installing from the git repository loads it globally for good:
+Install from the git repository:
 
 ```bash
 pi install git:github.com/poenl/pi-next-prompt
@@ -38,21 +36,67 @@ pi -e git:github.com/poenl/pi-next-prompt
 
 ## How it works
 
-The guess is produced as a side effect of the same reply: no extra model call, no extra round trip. Four points do the work:
+The guess is produced as a side effect of the same reply: no extra model call, no extra round trip. Five points do the work:
 
-| Point                | Action                                                                                                |
-| -------------------- | ----------------------------------------------------------------------------------------------------- |
-| `before_agent_start` | Appends the convention to the system prompt, telling the model to put the guess on its own line       |
-| while streaming      | Masks the sentinel and everything after it in the display layer (rendering only)                      |
-| `message_end`        | Extracts the guess and truly deletes the line (agent state / disk / UI at once)                       |
-| `agent_settled`      | Once the turn has actually finished and the editor is empty, writes the stashed guess into the editor |
+| When                | Action                                                                                          |
+| ------------------- | ----------------------------------------------------------------------------------------------- |
+| before the reply    | Appends the convention to the system prompt, telling the model to put the guess on its own line |
+| while streaming     | Masks the sentinel and everything after it in the display layer (rendering only)                |
+| when a message ends | Extracts the guess and truly deletes the line (agent state / disk / UI at once)                 |
+| when the turn ends  | Writes the stashed guess into the editor when the editor is empty                               |
+| shortcut            | Fills the last guess into the editor when the editor is empty (default `shift+right`)           |
+
+## Configuration
+
+Configuration file: `~/.pi/agent/extensions/pi-next-prompt/config.json`.
+
+```json
+{
+  "guessIntent": "optional",
+  "autoFill": true,
+  "shortcut": "shift+right"
+}
+```
+
+| `guessIntent` | What you get                                                           |
+| ------------- | ---------------------------------------------------------------------- |
+| `optional`    | the turn may end with no suggestion when the model is unsure (default) |
+| `always`      | every finished reply ends with a guess, even an off-target one         |
+
+| `autoFill` | Whether the guess goes into the editor automatically             |
+| ---------- | ---------------------------------------------------------------- |
+| `true`     | write it when the turn settles and the editor is empty (default) |
+| `false`    | only stash it; press the shortcut to fill it in                  |
+
+| `shortcut`    | Key that fills the stashed guess into an empty editor |
+| ------------- | ----------------------------------------------------- |
+| `shift+right` | default; steers clear of every default key in pi      |
+| any key id    | e.g. `f2`, `alt+right`                                |
+
+Setting `shortcut` to `false` turns the shortcut off.
+
+The file is read once, when the extension loads, so a change needs a pi restart. A missing file or broken JSON falls back to the defaults above; an invalid single field falls back for that field only.
+
+## Events
+
+When a settled turn produced a usable guess, the extension emits one event on pi's event bus:
+
+```ts
+pi.events.on('pi-next-prompt:guess', (data) => {
+  const { guess } = data as { guess: string }
+})
+```
+
+The channel is `pi-next-prompt:guess` and the payload is `{ guess: string }`. It fires at most once per finished reply, after the guess is settled, and regardless of `autoFill`.
 
 ## When it stays silent
 
 - no sentinel line at the end — no suggestion this turn, no error
 - the turn was interrupted (`aborted`) — nothing is filled
+- `autoFill` is `false` — the guess is stashed but the editor is left alone
 - not in `tui` mode — there is no editor to fill
 - the editor already has content — it is never overwritten
+- the shortcut does nothing when no guess is stashed yet
 - a new session starts — the previous stash is cleared, so nothing leaks across sessions
 
 ## Commands
@@ -66,6 +110,6 @@ pnpm format   # prettier --write
 ## Layout
 
 ```text
-src/index.ts               entry: stripGuess / hideGuess + the four hooks + the system-prompt convention
-tests/next-prompt.test.ts  cases for stripGuess and hideGuess
+src/index.ts               entry: stripGuess / hideGuess + the pi event wiring + rule(intent)
+tests/next-prompt.test.ts  cases for stripGuess, hideGuess, parseConfig and rule
 ```
