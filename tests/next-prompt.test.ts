@@ -1,8 +1,15 @@
 import { describe, expect, test } from 'vitest'
 
-import type { ExtensionAPI, MessageEndEvent } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, MessageEndEvent, SessionEntry } from '@earendil-works/pi-coding-agent'
 
-import nextPrompt, { hideGuess, parseConfig, rule, stripGuess } from '../src/index'
+import nextPrompt, {
+  ENTRY_TYPE,
+  hideGuess,
+  latestGuess,
+  parseConfig,
+  rule,
+  stripGuess
+} from '../src/index'
 
 type AssistantMessage = Extract<MessageEndEvent['message'], { role: 'assistant' }>
 
@@ -71,6 +78,44 @@ describe('stripGuess', () => {
     const { message, guess } = stripGuess(assistant('NEXT_PROMPT: 只有猜测'))
     expect(guess).toBe('只有猜测')
     expect(message.content).toEqual([])
+  })
+})
+
+describe('latestGuess', () => {
+  /** 造一条本扩展的会话记录；parentId 是写入时挂载的节点 */
+  function guessEntry(id: string, parentId: string | null, data: unknown) {
+    return {
+      type: 'custom',
+      id,
+      parentId,
+      timestamp: '',
+      customType: ENTRY_TYPE,
+      data
+    } as SessionEntry
+  }
+
+  test('没有记录时没有猜测', () => {
+    expect(latestGuess([], new Set())).toBeUndefined()
+  })
+
+  test('跳过其他扩展写的记录', () => {
+    const other = { ...guessEntry('a', 'm1', '别人的'), customType: 'other' } as SessionEntry
+    expect(latestGuess([other], new Set(['m1']))).toBeUndefined()
+  })
+
+  test('取挂载点在当前分支上的最后一条', () => {
+    const entries = [guessEntry('a', 'm1', '第一句'), guessEntry('b', 'm2', '第二句')]
+    expect(latestGuess(entries, new Set(['m1', 'm2']))).toBe('第二句')
+  })
+
+  test('挂载点不在当前分支上的记录被忽略', () => {
+    const entries = [guessEntry('a', 'm1', '本分支'), guessEntry('b', 'm9', '别的分支')]
+    expect(latestGuess(entries, new Set(['m1']))).toBe('本分支')
+  })
+
+  test('最后一条是本轮明确没有猜测时不再往前找', () => {
+    const entries = [guessEntry('a', 'm1', '旧猜测'), guessEntry('b', 'm2', null)]
+    expect(latestGuess(entries, new Set(['m1', 'm2']))).toBeUndefined()
   })
 })
 
@@ -163,10 +208,11 @@ describe('hideGuess', () => {
 })
 
 describe('接线', () => {
-  /** 只实现本扩展用到的四个方法的假 ExtensionAPI，用来跑一遍事件接线 */
+  /** 只实现本扩展用到的几个方法的假 ExtensionAPI，用来跑一遍事件接线 */
   function fakePi() {
     const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>()
     const emitted: Array<{ channel: string; data: unknown }> = []
+    const appended: Array<{ customType: string; data: unknown }> = []
     const api = {
       on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => {
         handlers.set(name, handler)
@@ -174,18 +220,31 @@ describe('接线', () => {
       },
       registerShortcut: () => {},
       registerMarkdownTransformer: () => {},
+      appendEntry: (customType: string, data: unknown) => appended.push({ customType, data }),
       events: {
         emit: (channel: string, data: unknown) => emitted.push({ channel, data }),
         on: () => () => {}
       }
     }
-    return { api: api as unknown as ExtensionAPI, handlers, emitted }
+    return { api: api as unknown as ExtensionAPI, handlers, emitted, appended }
   }
 
   const ctx = {
     hasUI: true,
     mode: 'tui',
     ui: { getEditorText: () => '', setEditorText: () => {} }
+  }
+
+  /** 造一条本扩展的会话记录 */
+  function guessEntry(id: string, parentId: string | null, data: unknown) {
+    return {
+      type: 'custom',
+      id,
+      parentId,
+      timestamp: '',
+      customType: ENTRY_TYPE,
+      data
+    } as SessionEntry
   }
 
   test('本轮产出猜测时发事件，中断时不发', () => {
@@ -203,5 +262,69 @@ describe('接线', () => {
     end({ message: assistant('正文\nNEXT_PROMPT: 第二轮') }, ctx)
     settled({ aborted: true }, ctx)
     expect(emitted).toEqual([])
+  })
+
+  test('收尾时把猜测写进会话，没有猜测写 null', () => {
+    const { api, handlers, appended } = fakePi()
+    nextPrompt(api)
+
+    const end = handlers.get('message_end')!
+    const settled = handlers.get('agent_settled')!
+
+    end({ message: assistant('正文\nNEXT_PROMPT: 猜测内容') }, ctx)
+    settled({ aborted: false }, ctx)
+    expect(appended).toEqual([{ customType: ENTRY_TYPE, data: '猜测内容' }])
+
+    settled({ aborted: false }, ctx)
+    expect(appended.at(-1)).toEqual({ customType: ENTRY_TYPE, data: null })
+  })
+
+  test('会话启动时读回当前分支的猜测并发事件', () => {
+    const { api, handlers, emitted } = fakePi()
+    nextPrompt(api)
+
+    const entries = [guessEntry('a', 'm1', '旧猜测'), guessEntry('b', 'm2', '最新猜测')]
+    const branch = [{ id: 'm1' }, { id: 'm2' }] as unknown as SessionEntry[]
+    const sessionCtx = {
+      ...ctx,
+      sessionManager: { getEntries: () => entries, getBranch: () => branch }
+    }
+
+    handlers.get('session_start')!({ reason: 'resume' }, sessionCtx)
+    expect(emitted).toEqual([{ channel: 'pi-next-prompt:guess', data: { guess: '最新猜测' } }])
+  })
+
+  test('切到另一条分支时取该分支存的猜测', () => {
+    const { api, handlers, emitted } = fakePi()
+    nextPrompt(api)
+
+    // 两条记录分别挂在两条分支上，当前分支只到 m2
+    const entries = [guessEntry('a', 'm1', '分支一的预测'), guessEntry('b', 'm2', '分支二的预测')]
+    const branch = [{ id: 'm2' }] as unknown as SessionEntry[]
+    const sessionCtx = {
+      ...ctx,
+      sessionManager: { getEntries: () => entries, getBranch: () => branch }
+    }
+
+    handlers.get('session_tree')!({ newLeafId: 'm2', oldLeafId: 'p1' }, sessionCtx)
+    expect(emitted).toStrictEqual([
+      { channel: 'pi-next-prompt:guess', data: { guess: '分支二的预测' } }
+    ])
+  })
+
+  test('切到没有预测的分支时发空事件，避免订阅方保留旧预测', () => {
+    const { api, handlers, emitted } = fakePi()
+    nextPrompt(api)
+
+    // 记录挂在 m2 之后，当前分支只到 m1，属于另一条分支
+    const entries = [guessEntry('a', 'm2', '旧分支的预测')]
+    const branch = [{ id: 'm1' }] as unknown as SessionEntry[]
+    const sessionCtx = {
+      ...ctx,
+      sessionManager: { getEntries: () => entries, getBranch: () => branch }
+    }
+
+    handlers.get('session_tree')!({ newLeafId: 'm1', oldLeafId: 'm2' }, sessionCtx)
+    expect(emitted).toStrictEqual([{ channel: 'pi-next-prompt:guess', data: { guess: undefined } }])
   })
 })

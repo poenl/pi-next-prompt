@@ -36,15 +36,17 @@ pi -e git:github.com/poenl/pi-next-prompt
 
 ## 工作原理
 
-猜测由本轮回复顺带产出，全程不额外调用模型、不追加往返。五个时点各司其职：
+猜测由本轮回复顺带产出，全程不额外调用模型、不追加往返。七个时点各司其职：
 
-| 时机           | 动作                                                      |
-| -------------- | --------------------------------------------------------- |
-| 回复开始前     | 往系统提示追加约定，让模型在最终回复末尾单独一行写猜测    |
-| 流式期间       | 显示层遮挡哨兵及其后内容（只影响渲染）                    |
-| 每条消息定稿时 | 抠出猜测并从消息里真删该行（agent 状态 / 落盘 / UI 同步） |
-| 本轮收尾时     | 编辑器为空时把暂存的猜测写进编辑器                        |
-| 快捷键         | 编辑器为空时填入最近一次猜测（默认 `shift+right`）        |
+| 时机           | 动作                                                                         |
+| -------------- | ---------------------------------------------------------------------------- |
+| 回复开始前     | 往系统提示追加约定，让模型在最终回复末尾单独一行写猜测                       |
+| 流式期间       | 显示层遮挡哨兵及其后内容（只影响渲染）                                       |
+| 每条消息定稿时 | 抠出猜测并从消息里真删该行（agent 状态 / 落盘 / UI 同步）                    |
+| 本轮收尾时     | 编辑器为空时把暂存的猜测写进编辑器；同时存进当前会话（这轮没猜就存一条空值） |
+| 打开会话时     | 读回当前分支上存的最后一条猜测                                               |
+| 切换分支后     | 再读一次，因为 `/tree` 导航不会触发会话启动                                  |
+| 快捷键         | 编辑器为空时填入最近一次猜测（默认 `shift+right`）                           |
 
 ## 配置
 
@@ -83,21 +85,22 @@ pi -e git:github.com/poenl/pi-next-prompt
 
 ```ts
 pi.events.on('pi-next-prompt:guess', (data) => {
-  const { guess } = data as { guess: string }
+  const { guess } = data as { guess: string | undefined }
 })
 ```
 
-通道为 `pi-next-prompt:guess`，payload 为 `{ guess: string }`。每轮回复结束后最多一次，发生在猜测确定之后，与 `autoFill` 是否开启无关。
+通道为 `pi-next-prompt:guess`，三处会发：本轮收尾且产出了猜测之后、打开会话读回之后、切换分支读回之后。payload 为 `{ guess: string | undefined }`：读不到猜测时发 `undefined`，订阅方可据此清掉正在显示的内容。与 `autoFill` 是否开启无关。
 
 ## 不生效的情形
 
 - 末尾没有哨兵行 —— 这轮没有建议，不报错
-- 本轮被中断（`aborted`）—— 不填
+- 本轮被中断（`aborted`）—— 不填编辑器，但猜测仍存进会话
 - `autoFill` 为 `false` —— 只保留猜测，不动编辑器
 - 非 `tui` 模式 —— 没有可填的编辑器
 - 编辑器已有内容 —— 不覆盖
 - 还没有任何猜测时按快捷键 —— 无动作
-- 新会话开始 —— 清空上一条暂存，不跨会话误填
+- 新会话开始 —— 清空上一条暂存，改为读取该会话里存的猜测
+- 切到没有存过猜测的分支 —— 发 `{ guess: undefined }`，不填任何内容
 
 ## 命令
 
@@ -110,6 +113,6 @@ pnpm format   # prettier --write
 ## 目录
 
 ```text
-src/index.ts               扩展入口：stripGuess / hideGuess + pi 事件接线 + rule(intent)
-tests/next-prompt.test.ts  stripGuess、hideGuess、parseConfig、rule 的用例
+src/index.ts               扩展入口：stripGuess / hideGuess / latestGuess + pi 事件接线 + rule(intent)
+tests/next-prompt.test.ts  stripGuess、hideGuess、latestGuess、parseConfig、rule 的用例
 ```

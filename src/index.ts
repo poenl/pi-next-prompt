@@ -17,7 +17,12 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import type { ExtensionAPI, MessageEndEvent } from '@earendil-works/pi-coding-agent'
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  MessageEndEvent,
+  SessionEntry
+} from '@earendil-works/pi-coding-agent'
 
 /** 事件里那条带 role 判别的 assistant 消息类型；pi 未直接导出 AssistantMessage */
 type AssistantMessage = Extract<MessageEndEvent['message'], { role: 'assistant' }>
@@ -30,6 +35,9 @@ type ShortcutKey = Parameters<ExtensionAPI['registerShortcut']>[0]
  * 正文末尾恰好构成哨兵前缀时会有瞬间误吞，靠 hideGuess 的「前缀不成立即恢复」把影响收在流式期间
  */
 const SENTINEL = 'NEXT_PROMPT:'
+
+/** 会话记录的类型名：用来在重载、换分支时认出本扩展写入的记录 */
+export const ENTRY_TYPE = 'pi-next-prompt:guess'
 
 /** 约定强度：optional 允许模型在没把握时不写，always 要求收尾必须给一句 */
 const INTENTS = ['optional', 'always'] as const
@@ -178,6 +186,25 @@ export function hideGuess(text: string): string {
   return text
 }
 
+/**
+ * 取当前分支上最后一条预测。记录挂在写入时的节点之后，所以按「挂载点是否在当前分支路径上」
+ * 判断归属：/tree 只能停在消息节点，记录作为它的子节点不在路径里，按记录自身判断会漏掉它。
+ */
+export function latestGuess(
+  entries: readonly SessionEntry[],
+  pathIds: ReadonlySet<string>
+): string | undefined {
+  // lib 为 es2022，没有 findLast，只能倒序循环
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]
+    if (entry?.type !== 'custom' || entry.customType !== ENTRY_TYPE) continue
+    if (!entry.parentId || !pathIds.has(entry.parentId)) continue
+    // 最后一条本扩展记录就是权威状态：null 表示这轮明确没有猜测，不再往前找
+    return typeof entry.data === 'string' ? entry.data : undefined
+  }
+  return undefined
+}
+
 export default function (pi: ExtensionAPI) {
   // 配置在扩展加载时读一次，三个字段统一为「改后需要重启 pi」；快捷键也必须在这时注册
   const config = loadConfigSync()
@@ -189,11 +216,25 @@ export default function (pi: ExtensionAPI) {
   // 最近一次收尾时的猜测，供快捷键取用；与 pendingGuess 分开，收尾后仍然保留
   let lastGuess: string | undefined
 
-  // 换会话时清掉上一条残留，避免跨会话误填
-  pi.on('session_start', () => {
+  /**
+   * 会话启动或换分支后：清掉本轮暂存，从会话里读回当前分支最近一次猜测，
+   * 再把结果广播出去。无论读没读到都发一次：订阅方（editor-bg 的幽灵文本）靠事件更新，
+   * 不发会把旧分支的预测留在编辑器里
+   */
+  function restore(ctx: ExtensionContext): void {
     pendingGuess = undefined
-    lastGuess = undefined
-  })
+    lastGuess = latestGuess(
+      ctx.sessionManager.getEntries(),
+      new Set(ctx.sessionManager.getBranch().map((entry) => entry.id))
+    )
+    pi.events.emit('pi-next-prompt:guess', { guess: lastGuess })
+  }
+
+  // 换会话、重载时清掉上一条残留，避免跨会话误填
+  pi.on('session_start', (_event, ctx) => restore(ctx))
+
+  // 换分支不会触发 session_start，所以单独再读一次，否则拿到的还是原分支的猜测
+  pi.on('session_tree', (_event, ctx) => restore(ctx))
 
   // 1. 注入约定：告诉模型在最终回复末尾的哪一行写什么
   pi.on('before_agent_start', (event) => ({
@@ -221,6 +262,8 @@ export default function (pi: ExtensionAPI) {
     pendingGuess = undefined
     // 先转存给快捷键：即使不自动填充，也保留这次猜测供快捷键取用
     lastGuess = guess
+    // 写进会话：没有猜测也写 null，保证重载或换分支后读回的状态与当时一致
+    pi.appendEntry(ENTRY_TYPE, guess ?? null)
     if (!guess || event.aborted) return
     // 通知其他扩展：本轮确实产出了猜测，与是否自动填充无关
     pi.events.emit('pi-next-prompt:guess', { guess })
