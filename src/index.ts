@@ -55,7 +55,7 @@ const RULE_HEAD = `
 
 ## Next input prediction
 When you finish this turn and will not call any more tools, output this as the very last line of your reply, on its own line:
-${SENTINEL} <one sentence guessing what the user will say to you next, in the user's language>
+${SENTINEL} <one sentence in the user's language that the user would type to you next — not something you would say>
 That line is not part of the answer.`
 
 /** 约定段的末句，按 guessIntent 变化 */
