@@ -36,13 +36,14 @@ pi -e git:github.com/poenl/pi-next-prompt
 
 ## How it works
 
-The guess is produced as a side effect of the same reply: no extra model call, no extra round trip. Seven points do the work:
+The guess normally rides along with the same reply, with no separate model call. When the model omits it, one short follow-up request asks for that line only, at most once per turn. Seven points do the work:
 
 | When                     | Action                                                                                                                                                                                        |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | before the reply         | Appends the convention to the system prompt, telling the model to put the guess on its own line                                                                                               |
 | while streaming          | Masks the sentinel and everything after it in the display layer (rendering only)                                                                                                              |
 | when a message ends      | Extracts the guess and truly deletes the line (agent state / disk / UI at once)                                                                                                               |
+| before the turn settles  | If no guess was produced, appends a hidden request and asks the model once to output only that line                                                                                           |
 | when the turn ends       | Writes the stashed guess into the editor when the editor is empty, or shows it on the line above the editor; stores it in the current session (a null record when the turn produced no guess) |
 | when a session opens     | Reads back the last guess stored on the current branch                                                                                                                                        |
 | when you switch branches | Reads it back again: `/tree` navigation does not start a session                                                                                                                              |
@@ -97,7 +98,7 @@ The channel is `pi-next-prompt:guess`. It fires in three places: after a settled
 
 ## When it stays silent
 
-- no sentinel line at the end — no new suggestion this turn, no error; the line keeps showing the previous guess
+- no sentinel line at the end — the extension asks once for that line only; if it is still missing, no new suggestion this turn, and the line keeps showing the previous guess
 - the turn was interrupted (`aborted`) — nothing is filled, but the guess is still stored in the session
 - the editor text equals the guess — the line is hidden, because the guess has already been adopted; this is compared on every render, so typing or clearing updates it immediately
 - `showSuggestion` is `false` — no line above the editor

@@ -1,14 +1,15 @@
 /**
  * pi-next-prompt — 在 AI 本轮最终回复结束后，猜一句用户接下来可能会说的话，填进输入框。
  *
- * 五个时点各司其职：
+ * 六个时点各司其职：
  * - before_agent_start：往系统提示追加约定，让模型在最终回复末尾单独一行写出猜测
  * - 流式期间：显示层遮挡哨兵及其后内容，避免猜测在输出过程中被看到（只影响渲染）
  * - message_end：抠出该行并把它从消息里真正删掉（state / 落盘 / UI 同时生效）
+ * - agent_before_settle：本轮漏写时补一次极短请求，让模型只补那一行
  * - agent_settled：本轮确实收尾、编辑器为空时，把暂存的猜测写进编辑器（可用 autoFill 关掉）
  * - 快捷键（默认 shift+right）：编辑器为空、或内容正好是猜测开头时，用猜测补全剩余部分
  *
- * 全程不额外调用模型：猜测由本轮回复顺带产出。
+ * 猜测默认由本轮回复顺带产出；漏写时才额外请求一次，且每轮最多补一次。
  *
  * 本轮真的产出猜测时，另通过 pi.events 在 pi-next-prompt:guess 通道发出事件，payload 为 { guess }
  */
@@ -42,6 +43,15 @@ export const ENTRY_TYPE = 'pi-next-prompt:guess'
 
 /** 输入框上方提示行的 key；同一个 key 再设置一次就是替换那一行 */
 const SUGGESTION_WIDGET = 'pi-next-prompt'
+
+/** 补写请求在会话里的类型名：用来认出这条系统提示，不与应用写入的预测记录混淆 */
+const RETRY_TYPE = 'pi-next-prompt:retry'
+
+/**
+ * 漏写时追加的提示。只让它输出哨兵行、不要重复正文，避免补写变成第二条长回复；
+ * 语言跟随上一轮，防止模型突然改成英文
+ */
+const RETRY_MESSAGE = `Your last reply is missing the NEXT_PROMPT line. Output only that line, in the same language as your last reply, and do not repeat the answer:\n${SENTINEL} <one sentence>`
 
 /**
  * shortcut 的宽松校验：只要求非空且不含空白。pi 未导出 parseKey，穷举 KeyId 的维护成本太高；
@@ -208,6 +218,9 @@ export default function (pi: ExtensionAPI) {
   // 最近一次收尾时的猜测，供快捷键取用；与 pendingGuess 分开，收尾后仍然保留
   let lastGuess: string | undefined
 
+  // 本轮是否已经补写过一次。补写后仍然没写就不再继续，避免无限续写
+  let retried = false
+
   /**
    * 把预测挂到输入框上方。是否看得见不在挂的时候定，而是每帧渲染时拿编辑器当前内容比较：
    * 内容与预测相同（已经采用）就不画，不同（包括正在手打或删空）就画。
@@ -255,9 +268,11 @@ export default function (pi: ExtensionAPI) {
   pi.on('session_tree', (_event, ctx) => restore(ctx))
 
   // 1. 注入约定：告诉模型在最终回复末尾的哪一行写什么，且每轮都必须写
-  pi.on('before_agent_start', (event) => ({
-    systemPrompt: event.systemPrompt + RULE
-  }))
+  pi.on('before_agent_start', (event) => {
+    // 新的用户轮次开始，允许再补写一次
+    retried = false
+    return { systemPrompt: event.systemPrompt + RULE }
+  })
 
   // 2. 显示层遮挡：只在流式期间生效。transformer 是会话级常驻，
   // 非流式时套用会把正文里提到的哨兵永久隐藏，因此必须靠 isStreaming 收口
@@ -274,7 +289,25 @@ export default function (pi: ExtensionAPI) {
     if (message !== event.message) return { message }
   })
 
-  // 4. 落地：只有本轮真正收尾时才写编辑器，带工具调用的中间轮不会触发
+  // 4. 漏写兜底：收尾前还没有预测时，追加一条不可见的提示让模型补写一次。
+  // 只在本轮正常完成时补；中断、出错不补。补写后仍漏就放弃，不再继续
+  pi.on('agent_before_settle', (event) => {
+    if (retried || event.outcome !== 'completed' || pendingGuess) return
+    retried = true
+    return {
+      entries: [
+        {
+          type: 'custom_message' as const,
+          customType: RETRY_TYPE,
+          content: RETRY_MESSAGE,
+          display: false
+        }
+      ],
+      continue: true
+    }
+  })
+
+  // 5. 落地：只有本轮真正收尾时才写编辑器，带工具调用的中间轮不会触发
   pi.on('agent_settled', (event, ctx) => {
     const guess = pendingGuess
     pendingGuess = undefined
@@ -294,7 +327,7 @@ export default function (pi: ExtensionAPI) {
     syncSuggestion(ctx)
   })
 
-  // 5. 快捷键：用最近一次猜测补全编辑器；shortcut 为 false 时不注册。
+  // 6. 快捷键：用最近一次猜测补全编辑器；shortcut 为 false 时不注册。
   // pi 的扩展快捷键是「匹配到即消费」，键名配成编辑器已用的键就会夺走该键原有功能
   if (config.shortcut)
     pi.registerShortcut(config.shortcut, {

@@ -341,6 +341,54 @@ describe('接线', () => {
     expect(appended.at(-1)).toEqual({ customType: ENTRY_TYPE, data: null })
   })
 
+  test('本轮漏写时追加一次不可见提示并要求续写', () => {
+    const { api, handlers } = fakePi()
+    nextPrompt(api)
+
+    handlers.get('message_end')!({ message: assistant('只有正文') }, ctx)
+    const result = handlers.get('agent_before_settle')!({ outcome: 'completed' }, ctx) as {
+      entries: Array<{ type: string; display: boolean; content: string }>
+      continue: boolean
+    }
+
+    expect(result.continue).toBe(true)
+    expect(result.entries[0]).toMatchObject({ type: 'custom_message', display: false })
+    expect(result.entries[0]?.content).toContain('NEXT_PROMPT:')
+  })
+
+  test('本轮已有预测、被中断或出错时不补', () => {
+    const { api, handlers } = fakePi()
+    nextPrompt(api)
+
+    handlers.get('message_end')!({ message: assistant('正文\nNEXT_PROMPT: 猜测内容') }, ctx)
+    expect(handlers.get('agent_before_settle')!({ outcome: 'completed' }, ctx)).toBeUndefined()
+
+    // 没有预测也不能在中断、出错时补，否则会多出一条用户并不想要的回复
+    handlers.get('message_end')!({ message: assistant('只有正文') }, ctx)
+    expect(handlers.get('agent_before_settle')!({ outcome: 'aborted' }, ctx)).toBeUndefined()
+    expect(handlers.get('agent_before_settle')!({ outcome: 'error' }, ctx)).toBeUndefined()
+  })
+
+  test('同一轮最多补一次，新的用户轮次才重置', () => {
+    const { api, handlers } = fakePi()
+    nextPrompt(api)
+
+    const beforeSettle = handlers.get('agent_before_settle')!
+    const beforeStart = handlers.get('before_agent_start')!
+
+    handlers.get('message_end')!({ message: assistant('只有正文') }, ctx)
+    expect(beforeSettle({ outcome: 'completed' }, ctx)).toBeDefined()
+
+    // 补写后仍然漏，不再继续补
+    handlers.get('message_end')!({ message: assistant('仍然没有哨兵') }, ctx)
+    expect(beforeSettle({ outcome: 'completed' }, ctx)).toBeUndefined()
+
+    // 用户提交下一轮后重新允许补写
+    beforeStart({ systemPrompt: '基础提示' }, ctx)
+    handlers.get('message_end')!({ message: assistant('又只有正文') }, ctx)
+    expect(beforeSettle({ outcome: 'completed' }, ctx)).toBeDefined()
+  })
+
   test('会话启动时读回当前分支的猜测并发事件', () => {
     const { api, handlers, emitted } = fakePi()
     nextPrompt(api)
