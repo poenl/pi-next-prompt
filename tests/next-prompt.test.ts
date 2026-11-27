@@ -7,7 +7,7 @@ import nextPrompt, {
   hideGuess,
   latestGuess,
   parseConfig,
-  rule,
+  RULE,
   stripGuess
 } from '../src/index'
 
@@ -120,20 +120,19 @@ describe('latestGuess', () => {
 })
 
 describe('parseConfig', () => {
-  test('取出约定强度、自动填充开关与快捷键', () => {
-    expect(parseConfig('{ "guessIntent": "always", "autoFill": false, "shortcut": "f2" }')).toEqual(
-      { guessIntent: 'always', autoFill: false, shortcut: 'f2' }
-    )
+  test('取出自动填充开关与快捷键', () => {
+    expect(parseConfig('{ "autoFill": false, "shortcut": "f2" }')).toEqual({
+      autoFill: false,
+      shortcut: 'f2'
+    })
   })
 
   test('字段缺失或取值非法时只回退该字段', () => {
-    expect(parseConfig('{ "guessIntent": "always" }')).toEqual({
-      guessIntent: 'always',
-      autoFill: true,
+    expect(parseConfig('{ "autoFill": false }')).toEqual({
+      autoFill: false,
       shortcut: 'shift+right'
     })
-    expect(parseConfig('{ "guessIntent": "high", "autoFill": "yes", "shortcut": "F2 " }')).toEqual({
-      guessIntent: 'optional',
+    expect(parseConfig('{ "autoFill": "yes", "shortcut": "F2 " }')).toEqual({
       autoFill: true,
       shortcut: 'shift+right'
     })
@@ -156,23 +155,17 @@ describe('parseConfig', () => {
 
   test('JSON 坏时整体退回默认值', () => {
     expect(parseConfig('不是 JSON')).toEqual({
-      guessIntent: 'optional',
       autoFill: true,
       shortcut: 'shift+right'
     })
   })
 })
 
-describe('rule', () => {
-  test('两档都含哨兵行，且互不相同', () => {
-    const texts = [rule('optional'), rule('always')]
-    for (const text of texts) expect(text).toContain('NEXT_PROMPT:')
-    expect(new Set(texts).size).toBe(2)
-  })
-
-  test('只有 optional 保留「没把握就别写」', () => {
-    expect(rule('optional')).toContain('or are not confident')
-    expect(rule('always')).toContain('even if you are not confident')
+describe('RULE', () => {
+  test('含哨兵行，且要求每轮必给一句', () => {
+    expect(RULE).toContain('NEXT_PROMPT:')
+    expect(RULE).toContain('even if you are not confident')
+    expect(RULE).not.toContain('do not output it')
   })
 })
 

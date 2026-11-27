@@ -39,40 +39,25 @@ const SENTINEL = 'NEXT_PROMPT:'
 /** 会话记录的类型名：用来在重载、换分支时认出本扩展写入的记录 */
 export const ENTRY_TYPE = 'pi-next-prompt:guess'
 
-/** 约定强度：optional 允许模型在没把握时不写，always 要求收尾必须给一句 */
-const INTENTS = ['optional', 'always'] as const
-
-type Intent = (typeof INTENTS)[number]
-
 /**
  * shortcut 的宽松校验：只要求非空且不含空白。pi 未导出 parseKey，穷举 KeyId 的维护成本太高；
  * 代价是写法错误的键名不会被拒绝，只表现为快捷键不触发
  */
 const SHORTCUT_PATTERN = /^\S+$/
 
-/** 约定段的固定部分：标题、哨兵行格式、说明 */
-const RULE_HEAD = `
+/**
+ * 注入系统提示的约定段。要求每轮收尾都必须给一句，不允许以「没把握」为由省略：
+ * 无把握时的最优猜测仍有参考价值，省略只会让这轮停在空白编辑器上
+ */
+export const RULE = `
 
 ## Next input prediction
 When you finish this turn and will not call any more tools, output this as the very last line of your reply, on its own line:
 ${SENTINEL} <one sentence in the user's language that the user would type to you next — not something you would say>
-That line is not part of the answer.`
+That line is not part of the answer. Always output it when the turn ends, even if you are not confident: give your single best guess.`
 
-/** 约定段的末句，按 guessIntent 变化 */
-const RULE_TAIL: Record<Intent, string> = {
-  optional: ' If you are still calling tools, or are not confident, do not output it.',
-  always:
-    ' Always output it when the turn ends, even if you are not confident: give your single best guess.'
-}
-
-/** 按 guessIntent 给出要注入的约定段 */
-export function rule(intent: Intent): string {
-  return RULE_HEAD + RULE_TAIL[intent]
-}
-
-/** 配置内容：约定强度、是否自动把猜测填进编辑器、触发填充的快捷键（undefined 表示不注册） */
+/** 配置内容：是否自动把猜测填进编辑器、触发填充的快捷键（undefined 表示不注册） */
 export interface Config {
-  guessIntent: Intent
   autoFill: boolean
   shortcut: ShortcutKey | undefined
 }
@@ -82,7 +67,6 @@ export interface Config {
  * 没有任何 shift+方向键绑定；代价是终端不区分 Shift 时这个键送不到 pi，快捷键按了没反应
  */
 const DEFAULT_CONFIG: Config = {
-  guessIntent: 'optional',
   autoFill: true,
   shortcut: 'shift+right'
 }
@@ -93,12 +77,8 @@ const DEFAULT_CONFIG: Config = {
  */
 export function parseConfig(raw: string): Config {
   try {
-    const parsed: { guessIntent?: unknown; autoFill?: unknown; shortcut?: unknown } =
-      JSON.parse(raw)
+    const parsed: { autoFill?: unknown; shortcut?: unknown } = JSON.parse(raw)
     return {
-      guessIntent: INTENTS.includes(parsed.guessIntent as Intent)
-        ? (parsed.guessIntent as Intent)
-        : DEFAULT_CONFIG.guessIntent,
       autoFill: typeof parsed.autoFill === 'boolean' ? parsed.autoFill : DEFAULT_CONFIG.autoFill,
       shortcut:
         parsed.shortcut === false
@@ -236,9 +216,9 @@ export default function (pi: ExtensionAPI) {
   // 换分支不会触发 session_start，所以单独再读一次，否则拿到的还是原分支的猜测
   pi.on('session_tree', (_event, ctx) => restore(ctx))
 
-  // 1. 注入约定：告诉模型在最终回复末尾的哪一行写什么
+  // 1. 注入约定：告诉模型在最终回复末尾的哪一行写什么，且每轮都必须写
   pi.on('before_agent_start', (event) => ({
-    systemPrompt: event.systemPrompt + rule(config.guessIntent)
+    systemPrompt: event.systemPrompt + RULE
   }))
 
   // 2. 显示层遮挡：只在流式期间生效。transformer 是会话级常驻，

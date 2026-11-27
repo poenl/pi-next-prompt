@@ -54,16 +54,12 @@ pi -e git:github.com/poenl/pi-next-prompt
 
 ```json
 {
-  "guessIntent": "optional",
   "autoFill": true,
   "shortcut": "shift+right"
 }
 ```
 
-| `guessIntent` | 你会得到什么                             |
-| ------------- | ---------------------------------------- |
-| `optional`    | 模型没把握时，这轮可能没有建议（默认）   |
-| `always`      | 每轮结束都给一句，可能出现不着边际的建议 |
+每轮结束都给一句：约定要求模型即使没把握，也要给出唯一的最优猜测。
 
 | `autoFill` | 是否自动把猜测填进编辑器           |
 | ---------- | ---------------------------------- |

@@ -54,16 +54,12 @@ Configuration file: `~/.pi/agent/extensions/pi-next-prompt/config.json`.
 
 ```json
 {
-  "guessIntent": "optional",
   "autoFill": true,
   "shortcut": "shift+right"
 }
 ```
 
-| `guessIntent` | What you get                                                           |
-| ------------- | ---------------------------------------------------------------------- |
-| `optional`    | the turn may end with no suggestion when the model is unsure (default) |
-| `always`      | every finished reply ends with a guess, even an off-target one         |
+Every finished reply ends with a guess: the convention asks for the single best guess even when the model is unsure.
 
 | `autoFill` | Whether the guess goes into the editor automatically             |
 | ---------- | ---------------------------------------------------------------- |
