@@ -6,7 +6,7 @@
  * - 流式期间：显示层遮挡哨兵及其后内容，避免猜测在输出过程中被看到（只影响渲染）
  * - message_end：抠出该行并把它从消息里真正删掉（state / 落盘 / UI 同时生效）
  * - agent_settled：本轮确实收尾、编辑器为空时，把暂存的猜测写进编辑器（可用 autoFill 关掉）
- * - 快捷键（默认 shift+right）：编辑器为空时把最近一次猜测填进去
+ * - 快捷键（默认 shift+right）：编辑器为空、或内容正好是猜测开头时，用猜测补全剩余部分
  *
  * 全程不额外调用模型：猜测由本轮回复顺带产出。
  *
@@ -294,16 +294,18 @@ export default function (pi: ExtensionAPI) {
     syncSuggestion(ctx)
   })
 
-  // 5. 快捷键：编辑器为空时填入最近一次猜测；shortcut 为 false 时不注册。
+  // 5. 快捷键：用最近一次猜测补全编辑器；shortcut 为 false 时不注册。
   // pi 的扩展快捷键是「匹配到即消费」，键名配成编辑器已用的键就会夺走该键原有功能
   if (config.shortcut)
     pi.registerShortcut(config.shortcut, {
-      description: '填入上一条预测到编辑器',
+      description: '补全上一条预测',
       handler: (ctx) => {
         if (!lastGuess) return
         if (!ctx.hasUI || ctx.mode !== 'tui') return
-        // 用户已经在打字时不覆盖
-        if (ctx.ui.getEditorText() !== '') return
+        const current = ctx.ui.getEditorText()
+        // 只在编辑器内容正好是预测开头时补全：空编辑器也属于这种情况，
+        // 已经打了一半的同一句可以接着补；无关内容、或已经打完整句都不动
+        if (!lastGuess.startsWith(current) || current === lastGuess) return
         ctx.ui.setEditorText(lastGuess)
         // 采用后编辑器内容与预测相同，提示行随之隐藏
         syncSuggestion(ctx)

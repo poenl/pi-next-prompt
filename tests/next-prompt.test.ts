@@ -510,4 +510,46 @@ describe('接线', () => {
       restoreEnv()
     }
   })
+
+  test('编辑器内容正好是预测开头时，快捷键补全剩余部分', () => {
+    const restoreEnv = withConfig({ autoFill: false })
+    try {
+      const { api, handlers, shortcuts } = fakePi()
+      nextPrompt(api)
+      const { state, ctx: c } = uiCtx()
+
+      handlers.get('message_end')!({ message: assistant('正文\nNEXT_PROMPT: 猜测内容') }, c)
+      handlers.get('agent_settled')!({ aborted: false }, c)
+      state.text = '猜测'
+
+      shortcuts.get('shift+right')!(c)
+
+      expect(state.text).toBe('猜测内容')
+    } finally {
+      restoreEnv()
+    }
+  })
+
+  test('编辑器内容无关或比预测更长时，快捷键不覆盖', () => {
+    const restoreEnv = withConfig({ autoFill: false })
+    try {
+      const { api, handlers, shortcuts } = fakePi()
+      nextPrompt(api)
+      const { state, ctx: c } = uiCtx()
+
+      handlers.get('message_end')!({ message: assistant('正文\nNEXT_PROMPT: 猜测内容') }, c)
+      handlers.get('agent_settled')!({ aborted: false }, c)
+
+      state.text = '别的输入'
+      shortcuts.get('shift+right')!(c)
+      expect(state.text).toBe('别的输入')
+
+      // 以预测开头但后面还有用户自己的字：补全会删掉它们，不能做
+      state.text = '猜测内容加了一点'
+      shortcuts.get('shift+right')!(c)
+      expect(state.text).toBe('猜测内容加了一点')
+    } finally {
+      restoreEnv()
+    }
+  })
 })
