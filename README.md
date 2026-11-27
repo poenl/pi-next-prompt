@@ -40,7 +40,7 @@ The guess normally rides along with the same reply, with no separate model call.
 
 | When                     | Action                                                                                                                                                                                        |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| before the reply         | Appends the convention to the system prompt, telling the model to put the guess on its own line                                                                                               |
+| before the reply         | Clears the previous guess, then appends the convention to the system prompt, telling the model to put the guess on its own line                                                               |
 | while streaming          | Masks the sentinel and everything after it in the display layer (rendering only)                                                                                                              |
 | when a message ends      | Extracts the guess and truly deletes the line (agent state / disk / UI at once)                                                                                                               |
 | before the turn settles  | If no guess was produced, appends a hidden request and asks the model once to output only that line                                                                                           |
@@ -99,6 +99,7 @@ The channel is `pi-next-prompt:guess`. It fires in three places: after a settled
 ## When it stays silent
 
 - no sentinel line at the end — the extension asks once for that line only; if it is still missing, no new suggestion this turn, and the line keeps showing the previous guess
+- you send a new message — the previous guess is cleared, so an already-answered turn never keeps suggesting
 - the turn was interrupted (`aborted`) — nothing is filled, but the guess is still stored in the session
 - the editor text equals the guess — the line is hidden, because the guess has already been adopted; this is compared on every render, so typing or clearing updates it immediately
 - `showSuggestion` is `false` — no line above the editor

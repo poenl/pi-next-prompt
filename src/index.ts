@@ -2,7 +2,7 @@
  * pi-next-prompt — 在 AI 本轮最终回复结束后，猜一句用户接下来可能会说的话，填进输入框。
  *
  * 六个时点各司其职：
- * - before_agent_start：往系统提示追加约定，让模型在最终回复末尾单独一行写出猜测
+ * - before_agent_start：清掉上一条预测，并往系统提示追加约定，让模型在最终回复末尾单独一行写出猜测
  * - 流式期间：显示层遮挡哨兵及其后内容，避免猜测在输出过程中被看到（只影响渲染）
  * - message_end：抠出该行并把它从消息里真正删掉（state / 落盘 / UI 同时生效）
  * - agent_before_settle：本轮漏写时补一次极短请求，让模型只补那一行
@@ -268,9 +268,12 @@ export default function (pi: ExtensionAPI) {
   pi.on('session_tree', (_event, ctx) => restore(ctx))
 
   // 1. 注入约定：告诉模型在最终回复末尾的哪一行写什么，且每轮都必须写
-  pi.on('before_agent_start', (event) => {
-    // 新的用户轮次开始，允许再补写一次
+  pi.on('before_agent_start', (event, ctx) => {
+    // 新的用户轮次开始：上一条预测已经过期，先清掉再允许补写一次。
+    // 用户已经自己发了话，旧预测再留着只会误导快捷键与提示行
     retried = false
+    lastGuess = undefined
+    syncSuggestion(ctx)
     return { systemPrompt: event.systemPrompt + RULE }
   })
 

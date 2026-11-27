@@ -559,6 +559,29 @@ describe('接线', () => {
     }
   })
 
+  test('用户发送新消息后清掉上一条预测', () => {
+    const restoreEnv = withConfig({ autoFill: false })
+    try {
+      const { api, handlers, shortcuts } = fakePi()
+      nextPrompt(api)
+      const { state, ctx: c } = uiCtx()
+
+      handlers.get('message_end')!({ message: assistant('正文\nNEXT_PROMPT: 猜测内容') }, c)
+      handlers.get('agent_settled')!({ aborted: false }, c)
+      expect(suggestionText(state.widget)).toContain('猜测内容')
+
+      // 用户提交了新消息，旧预测过期
+      handlers.get('before_agent_start')!({ systemPrompt: '基础提示' }, c)
+
+      expect(suggestionText(state.widget) ?? '').toBe('')
+      // 已经没有预测可补，快捷键也不动
+      shortcuts.get('shift+right')!(c)
+      expect(state.text).toBe('')
+    } finally {
+      restoreEnv()
+    }
+  })
+
   test('编辑器内容正好是预测开头时，快捷键补全剩余部分', () => {
     const restoreEnv = withConfig({ autoFill: false })
     try {

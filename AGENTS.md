@@ -30,6 +30,7 @@ agent 状态、磁盘、UI 之前被摘除。
 - 本轮没有新预测时保留上一条（不清空），会话恢复或切分支读回的状态覆盖它
 - 提示行用自定义组件渲染：淡灰（muted 主题色）+ `›`；主题色在渲染时取，换主题不会留旧色
 - 每条 assistant 消息结束都会覆盖暂存 `pendingGuess`，`session_start` 清空
+- 用户提交新消息（`before_agent_start`）时清空上一条预测并隐藏提示行，旧预测不跟着进入新轮次
 - 收尾前（`agent_before_settle`）若本轮没有预测，追加一条不可见提示并 `continue` 一次；
   仅限 `outcome === 'completed'`，每轮最多补一次，`before_agent_start` 重置
 - 模型不照做时表现为"这轮没有建议"，不报错
