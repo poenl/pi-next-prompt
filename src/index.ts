@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
+import { truncateToVisualLines } from '@earendil-works/pi-coding-agent'
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -39,6 +40,9 @@ const SENTINEL = 'NEXT_PROMPT:'
 /** 会话记录的类型名：用来在重载、换分支时认出本扩展写入的记录 */
 export const ENTRY_TYPE = 'pi-next-prompt:guess'
 
+/** 输入框上方提示行的 key；同一个 key 再设置一次就是替换那一行 */
+const SUGGESTION_WIDGET = 'pi-next-prompt'
+
 /**
  * shortcut 的宽松校验：只要求非空且不含空白。pi 未导出 parseKey，穷举 KeyId 的维护成本太高；
  * 代价是写法错误的键名不会被拒绝，只表现为快捷键不触发
@@ -59,6 +63,7 @@ That line is not part of the answer. Always output it when the turn ends, even i
 /** 配置内容：是否自动把猜测填进编辑器、触发填充的快捷键（undefined 表示不注册） */
 export interface Config {
   autoFill: boolean
+  showSuggestion: boolean
   shortcut: ShortcutKey | undefined
 }
 
@@ -68,6 +73,7 @@ export interface Config {
  */
 const DEFAULT_CONFIG: Config = {
   autoFill: true,
+  showSuggestion: true,
   shortcut: 'shift+right'
 }
 
@@ -77,9 +83,15 @@ const DEFAULT_CONFIG: Config = {
  */
 export function parseConfig(raw: string): Config {
   try {
-    const parsed: { autoFill?: unknown; shortcut?: unknown } = JSON.parse(raw)
+    const parsed: { autoFill?: unknown; showSuggestion?: unknown; shortcut?: unknown } =
+      JSON.parse(raw)
     return {
       autoFill: typeof parsed.autoFill === 'boolean' ? parsed.autoFill : DEFAULT_CONFIG.autoFill,
+      // 未自动填入时是否用输入框上方的一行提示展示预测
+      showSuggestion:
+        typeof parsed.showSuggestion === 'boolean'
+          ? parsed.showSuggestion
+          : DEFAULT_CONFIG.showSuggestion,
       shortcut:
         parsed.shortcut === false
           ? undefined
@@ -197,6 +209,31 @@ export default function (pi: ExtensionAPI) {
   let lastGuess: string | undefined
 
   /**
+   * 把预测挂到输入框上方。是否看得见不在挂的时候定，而是每帧渲染时拿编辑器当前内容比较：
+   * 内容与预测相同（已经采用）就不画，不同（包括正在手打或删空）就画。
+   * 这样不需要编辑器变更事件，输入过程中也能立即跟随
+   */
+  function syncSuggestion(ctx: ExtensionContext): void {
+    if (!ctx.hasUI || ctx.mode !== 'tui') return
+    const suggestion = lastGuess
+    if (!config.showSuggestion || suggestion === undefined) {
+      ctx.ui.setWidget(SUGGESTION_WIDGET, undefined)
+      return
+    }
+    // 用组件而不是字符串数组：主题色只能在渲染时取，换主题后颜色才不会过时
+    ctx.ui.setWidget(SUGGESTION_WIDGET, (_tui, theme) => ({
+      render: (width: number) => {
+        // 与编辑器内容相同说明已经采用，不重复画；用户删掉后下一帧自动回来
+        if (ctx.ui.getEditorText() === suggestion) return []
+        return truncateToVisualLines(theme.fg('muted', `› ${suggestion}`), 2, width, 1, 'start')
+          .visualLines
+      },
+      // 每次渲染重新取主题色与编辑器内容，不缓存，无需失效处理
+      invalidate: () => {}
+    }))
+  }
+
+  /**
    * 会话启动或换分支后：清掉本轮暂存，从会话里读回当前分支最近一次猜测，
    * 再把结果广播出去。无论读没读到都发一次：订阅方（editor-bg 的幽灵文本）靠事件更新，
    * 不发会把旧分支的预测留在编辑器里
@@ -208,6 +245,7 @@ export default function (pi: ExtensionAPI) {
       new Set(ctx.sessionManager.getBranch().map((entry) => entry.id))
     )
     pi.events.emit('pi-next-prompt:guess', { guess: lastGuess })
+    syncSuggestion(ctx)
   }
 
   // 换会话、重载时清掉上一条残留，避免跨会话误填
@@ -240,19 +278,20 @@ export default function (pi: ExtensionAPI) {
   pi.on('agent_settled', (event, ctx) => {
     const guess = pendingGuess
     pendingGuess = undefined
-    // 先转存给快捷键：即使不自动填充，也保留这次猜测供快捷键取用
-    lastGuess = guess
+    // 本轮有预测才替换提示行用的那一条；没有就保留上一条，不让提示无缘无故消失
+    if (guess) lastGuess = guess
     // 写进会话：没有猜测也写 null，保证重载或换分支后读回的状态与当时一致
     pi.appendEntry(ENTRY_TYPE, guess ?? null)
-    if (!guess || event.aborted) return
-    // 通知其他扩展：本轮确实产出了猜测，与是否自动填充无关
-    pi.events.emit('pi-next-prompt:guess', { guess })
-    if (!config.autoFill) return
-    // 非交互模式没有可填的编辑器
-    if (!ctx.hasUI || ctx.mode !== 'tui') return
-    // 用户已经在打字时不覆盖
-    if (ctx.ui.getEditorText() !== '') return
-    ctx.ui.setEditorText(guess)
+    if (guess && !event.aborted) {
+      // 通知其他扩展：本轮确实产出了猜测，与是否自动填充无关
+      pi.events.emit('pi-next-prompt:guess', { guess })
+      // 自动填入的前提：开关开着、有可填的编辑器、用户还没开始打字
+      if (config.autoFill && ctx.hasUI && ctx.mode === 'tui' && ctx.ui.getEditorText() === '') {
+        ctx.ui.setEditorText(guess)
+      }
+    }
+    // 统一在这一处定提示行：自动填入后编辑器里已经有这句，相等即不显示
+    syncSuggestion(ctx)
   })
 
   // 5. 快捷键：编辑器为空时填入最近一次猜测；shortcut 为 false 时不注册。
@@ -266,6 +305,8 @@ export default function (pi: ExtensionAPI) {
         // 用户已经在打字时不覆盖
         if (ctx.ui.getEditorText() !== '') return
         ctx.ui.setEditorText(lastGuess)
+        // 采用后编辑器内容与预测相同，提示行随之隐藏
+        syncSuggestion(ctx)
       }
     })
 }

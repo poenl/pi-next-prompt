@@ -38,15 +38,15 @@ pi -e git:github.com/poenl/pi-next-prompt
 
 The guess is produced as a side effect of the same reply: no extra model call, no extra round trip. Seven points do the work:
 
-| When                     | Action                                                                                                                                                  |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| before the reply         | Appends the convention to the system prompt, telling the model to put the guess on its own line                                                         |
-| while streaming          | Masks the sentinel and everything after it in the display layer (rendering only)                                                                        |
-| when a message ends      | Extracts the guess and truly deletes the line (agent state / disk / UI at once)                                                                         |
-| when the turn ends       | Writes the stashed guess into the editor when the editor is empty, and stores it in the current session (a null record when the turn produced no guess) |
-| when a session opens     | Reads back the last guess stored on the current branch                                                                                                  |
-| when you switch branches | Reads it back again: `/tree` navigation does not start a session                                                                                        |
-| shortcut                 | Fills the last guess into the editor when the editor is empty (default `shift+right`)                                                                   |
+| When                     | Action                                                                                                                                                                                        |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| before the reply         | Appends the convention to the system prompt, telling the model to put the guess on its own line                                                                                               |
+| while streaming          | Masks the sentinel and everything after it in the display layer (rendering only)                                                                                                              |
+| when a message ends      | Extracts the guess and truly deletes the line (agent state / disk / UI at once)                                                                                                               |
+| when the turn ends       | Writes the stashed guess into the editor when the editor is empty, or shows it on the line above the editor; stores it in the current session (a null record when the turn produced no guess) |
+| when a session opens     | Reads back the last guess stored on the current branch                                                                                                                                        |
+| when you switch branches | Reads it back again: `/tree` navigation does not start a session                                                                                                                              |
+| shortcut                 | Fills the last guess into the editor when the editor is empty (default `shift+right`)                                                                                                         |
 
 ## Configuration
 
@@ -55,6 +55,7 @@ Configuration file: `~/.pi/agent/extensions/pi-next-prompt/config.json`.
 ```json
 {
   "autoFill": true,
+  "showSuggestion": true,
   "shortcut": "shift+right"
 }
 ```
@@ -65,6 +66,11 @@ Every finished reply ends with a guess: the convention asks for the single best 
 | ---------- | ---------------------------------------------------------------- |
 | `true`     | write it when the turn settles and the editor is empty (default) |
 | `false`    | only stash it; press the shortcut to fill it in                  |
+
+| `showSuggestion` | The suggestion line above the editor                                                                              |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `true`           | shown whenever the editor text differs from the guess, hidden while they match; checked on every render (default) |
+| `false`          | never shown                                                                                                       |
 
 | `shortcut`    | Key that fills the stashed guess into an empty editor |
 | ------------- | ----------------------------------------------------- |
@@ -89,11 +95,12 @@ The channel is `pi-next-prompt:guess`. It fires in three places: after a settled
 
 ## When it stays silent
 
-- no sentinel line at the end — no suggestion this turn, no error
+- no sentinel line at the end — no new suggestion this turn, no error; the line keeps showing the previous guess
 - the turn was interrupted (`aborted`) — nothing is filled, but the guess is still stored in the session
-- `autoFill` is `false` — the guess is stashed but the editor is left alone
+- the editor text equals the guess — the line is hidden, because the guess has already been adopted; this is compared on every render, so typing or clearing updates it immediately
+- `showSuggestion` is `false` — no line above the editor
 - not in `tui` mode — there is no editor to fill
-- the editor already has content — it is never overwritten
+- the editor already has content — it is never overwritten; the guess goes to the suggestion line instead
 - the shortcut does nothing when no guess is stashed yet
 - a new session starts — the previous stash is cleared and the guess stored in that session is loaded instead
 - you switch to a branch with no stored guess — `{ guess: undefined }` is emitted and nothing is filled

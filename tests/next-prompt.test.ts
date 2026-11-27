@@ -1,4 +1,8 @@
-import { describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test } from 'vitest'
+
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import type { ExtensionAPI, MessageEndEvent, SessionEntry } from '@earendil-works/pi-coding-agent'
 
@@ -120,20 +124,21 @@ describe('latestGuess', () => {
 })
 
 describe('parseConfig', () => {
-  test('取出自动填充开关与快捷键', () => {
-    expect(parseConfig('{ "autoFill": false, "shortcut": "f2" }')).toEqual({
-      autoFill: false,
-      shortcut: 'f2'
-    })
+  test('取出自动填充、提示行与快捷键三项', () => {
+    expect(parseConfig('{ "autoFill": false, "showSuggestion": false, "shortcut": "f2" }')).toEqual(
+      { autoFill: false, showSuggestion: false, shortcut: 'f2' }
+    )
   })
 
   test('字段缺失或取值非法时只回退该字段', () => {
     expect(parseConfig('{ "autoFill": false }')).toEqual({
       autoFill: false,
+      showSuggestion: true,
       shortcut: 'shift+right'
     })
-    expect(parseConfig('{ "autoFill": "yes", "shortcut": "F2 " }')).toEqual({
+    expect(parseConfig('{ "autoFill": "yes", "showSuggestion": 1, "shortcut": "F2 " }')).toEqual({
       autoFill: true,
+      showSuggestion: true,
       shortcut: 'shift+right'
     })
   })
@@ -156,6 +161,7 @@ describe('parseConfig', () => {
   test('JSON 坏时整体退回默认值', () => {
     expect(parseConfig('不是 JSON')).toEqual({
       autoFill: true,
+      showSuggestion: true,
       shortcut: 'shift+right'
     })
   })
@@ -201,9 +207,27 @@ describe('hideGuess', () => {
 })
 
 describe('接线', () => {
+  /**
+   * 把配置写进临时 agent 目录并让扩展读到它，返回还原函数。
+   * 配置在每次调用扩展工厂时读取，所以改环境变量后重新调用即可生效
+   */
+  function withConfig(config: Record<string, unknown>): () => void {
+    const dir = mkdtempSync(join(tmpdir(), 'pi-next-prompt-'))
+    mkdirSync(join(dir, 'extensions', 'pi-next-prompt'), { recursive: true })
+    writeFileSync(join(dir, 'extensions', 'pi-next-prompt', 'config.json'), JSON.stringify(config))
+    const previous = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = dir
+    return () => {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR
+      else process.env.PI_CODING_AGENT_DIR = previous
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
   /** 只实现本扩展用到的几个方法的假 ExtensionAPI，用来跑一遍事件接线 */
   function fakePi() {
     const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>()
+    const shortcuts = new Map<string, (ctx: unknown) => void>()
     const emitted: Array<{ channel: string; data: unknown }> = []
     const appended: Array<{ customType: string; data: unknown }> = []
     const api = {
@@ -211,7 +235,9 @@ describe('接线', () => {
         handlers.set(name, handler)
         return () => {}
       },
-      registerShortcut: () => {},
+      registerShortcut: (key: string, options: { handler: (ctx: unknown) => void }) => {
+        shortcuts.set(key, options.handler)
+      },
       registerMarkdownTransformer: () => {},
       appendEntry: (customType: string, data: unknown) => appended.push({ customType, data }),
       events: {
@@ -219,14 +245,57 @@ describe('接线', () => {
         on: () => () => {}
       }
     }
-    return { api: api as unknown as ExtensionAPI, handlers, emitted, appended }
+    return { api: api as unknown as ExtensionAPI, handlers, shortcuts, emitted, appended }
   }
 
   const ctx = {
     hasUI: true,
     mode: 'tui',
-    ui: { getEditorText: () => '', setEditorText: () => {} }
+    ui: { getEditorText: () => '', setEditorText: () => {}, setWidget: () => {} }
   }
+
+  /** 造一个记录编辑器与提示行状态的 ctx，用来验证两者互斥 */
+  function uiCtx() {
+    const state = {
+      text: '',
+      widget: undefined as
+        | ((
+            tui: unknown,
+            theme: { fg: (token: string, text: string) => string }
+          ) => {
+            render(width: number): string[]
+          })
+        | undefined
+    }
+    const ui = {
+      getEditorText: () => state.text,
+      setEditorText: (text: string) => {
+        state.text = text
+      },
+      setWidget: (_key: string, content: typeof state.widget) => {
+        state.widget = content
+      }
+    }
+    return { state, ctx: { ...ctx, ui } }
+  }
+
+  /** 把提示行组件渲染一遍，返回它显示的文本；没有提示行时返回 undefined */
+  function suggestionText(widget: ReturnType<typeof uiCtx>['state']['widget']) {
+    if (!widget) return undefined
+    // 测试只关心文字，主题直接把内容原样返回
+    const component = widget(undefined, { fg: (_token, text) => text })
+    return component.render(200).join('\n')
+  }
+
+  // 接线测试不读用户的真实配置：每个用例都从空配置（全默认）开始
+  let restoreEnv: (() => void) | undefined
+  beforeEach(() => {
+    restoreEnv = withConfig({})
+  })
+  afterEach(() => {
+    restoreEnv?.()
+    restoreEnv = undefined
+  })
 
   /** 造一条本扩展的会话记录 */
   function guessEntry(id: string, parentId: string | null, data: unknown) {
@@ -319,5 +388,126 @@ describe('接线', () => {
 
     handlers.get('session_tree')!({ newLeafId: 'm1', oldLeafId: 'm2' }, sessionCtx)
     expect(emitted).toStrictEqual([{ channel: 'pi-next-prompt:guess', data: { guess: undefined } }])
+  })
+
+  test('自动填入后不再用提示行重复显示', () => {
+    const { api, handlers } = fakePi()
+    nextPrompt(api)
+    const { state, ctx: c } = uiCtx()
+
+    handlers.get('message_end')!({ message: assistant('正文\nNEXT_PROMPT: 猜测内容') }, c)
+    handlers.get('agent_settled')!({ aborted: false }, c)
+
+    expect(state.text).toBe('猜测内容')
+    // 已经填进编辑器，组件仍挂着，但渲染为空
+    expect(suggestionText(state.widget) ?? '').toBe('')
+  })
+
+  test('编辑器已有内容时不覆盖，改用提示行展示', () => {
+    const { api, handlers } = fakePi()
+    nextPrompt(api)
+    const { state, ctx: c } = uiCtx()
+    state.text = '我正在输入'
+
+    handlers.get('message_end')!({ message: assistant('正文\nNEXT_PROMPT: 猜测内容') }, c)
+    handlers.get('agent_settled')!({ aborted: false }, c)
+
+    expect(state.text).toBe('我正在输入')
+    expect(suggestionText(state.widget)).toContain('猜测内容')
+  })
+
+  test('编辑器内容与预测相同时隐藏，删空后立即回来', () => {
+    const restoreEnv = withConfig({ autoFill: false })
+    try {
+      const { api, handlers } = fakePi()
+      nextPrompt(api)
+      const { state, ctx: c } = uiCtx()
+
+      handlers.get('message_end')!({ message: assistant('正文\nNEXT_PROMPT: 猜测内容') }, c)
+      handlers.get('agent_settled')!({ aborted: false }, c)
+      expect(suggestionText(state.widget)).toContain('猜测内容')
+
+      // 用户手打出同一句：下一帧渲染时就隐藏
+      state.text = '猜测内容'
+      expect(suggestionText(state.widget) ?? '').toBe('')
+
+      // 删掉后下一帧又回来
+      state.text = ''
+      expect(suggestionText(state.widget)).toContain('猜测内容')
+    } finally {
+      restoreEnv()
+    }
+  })
+
+  test('本轮没有预测时保留上一条提示', () => {
+    const restoreEnv = withConfig({ autoFill: false })
+    try {
+      const { api, handlers } = fakePi()
+      nextPrompt(api)
+      const { state, ctx: c } = uiCtx()
+
+      handlers.get('message_end')!({ message: assistant('正文\nNEXT_PROMPT: 猜测内容') }, c)
+      handlers.get('agent_settled')!({ aborted: false }, c)
+
+      handlers.get('message_end')!({ message: assistant('只有正文') }, c)
+      handlers.get('agent_settled')!({ aborted: false }, c)
+
+      expect(suggestionText(state.widget)).toContain('猜测内容')
+    } finally {
+      restoreEnv()
+    }
+  })
+
+  test('关掉自动填入时用提示行展示，关掉提示行时都不出现', () => {
+    const restoreEnv = withConfig({ autoFill: false })
+    try {
+      const { api, handlers } = fakePi()
+      nextPrompt(api)
+      const { state, ctx: c } = uiCtx()
+
+      handlers.get('message_end')!({ message: assistant('正文\nNEXT_PROMPT: 猜测内容') }, c)
+      handlers.get('agent_settled')!({ aborted: false }, c)
+
+      expect(state.text).toBe('')
+      expect(suggestionText(state.widget)).toContain('猜测内容')
+    } finally {
+      restoreEnv()
+    }
+
+    const restoreEnv2 = withConfig({ autoFill: false, showSuggestion: false })
+    try {
+      const { api, handlers } = fakePi()
+      nextPrompt(api)
+      const { state, ctx: c } = uiCtx()
+
+      handlers.get('message_end')!({ message: assistant('正文\nNEXT_PROMPT: 猜测内容') }, c)
+      handlers.get('agent_settled')!({ aborted: false }, c)
+
+      expect(state.text).toBe('')
+      expect(suggestionText(state.widget)).toBeUndefined()
+    } finally {
+      restoreEnv2()
+    }
+  })
+
+  test('快捷键采用后清掉提示行', () => {
+    const restoreEnv = withConfig({ autoFill: false })
+    try {
+      const { api, handlers, shortcuts } = fakePi()
+      nextPrompt(api)
+      const { state, ctx: c } = uiCtx()
+
+      handlers.get('message_end')!({ message: assistant('正文\nNEXT_PROMPT: 猜测内容') }, c)
+      handlers.get('agent_settled')!({ aborted: false }, c)
+      expect(suggestionText(state.widget)).toContain('猜测内容')
+
+      shortcuts.get('shift+right')!(c)
+
+      expect(state.text).toBe('猜测内容')
+      // 采用后编辑器内容与预测相同，渲染为空
+      expect(suggestionText(state.widget) ?? '').toBe('')
+    } finally {
+      restoreEnv()
+    }
   })
 })
