@@ -51,7 +51,7 @@ const RETRY_TYPE = 'pi-next-prompt:retry'
  * 漏写时追加的提示。只让它输出哨兵行、不要重复正文，避免补写变成第二条长回复；
  * 语言跟随上一轮，防止模型突然改成英文
  */
-const RETRY_MESSAGE = `Your last reply is missing the NEXT_PROMPT line. Output only that line, in the same language as your last reply, and do not repeat the answer:\n${SENTINEL} <one sentence>`
+const RETRY_MESSAGE = `Your reply must end with the NEXT_PROMPT line. Output only that line, same language, no repetition:\n${SENTINEL} <one sentence>`
 
 /**
  * shortcut 的宽松校验：只要求非空且不含空白。pi 未导出 parseKey，穷举 KeyId 的维护成本太高；
